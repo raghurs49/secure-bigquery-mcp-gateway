@@ -1,0 +1,22 @@
+[project]
+name = "secure-bigquery-mcp-gateway"
+version = "0.1.0"
+description = "A Cloud Run-hosted, read-only BigQuery MCP gateway with separated identities."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "google-cloud-bigquery>=3.38.0",
+  "mcp>=1.26.0",
+  "pydantic-settings>=2.12.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "ruff>=0.15.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
