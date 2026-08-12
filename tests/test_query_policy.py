@@ -2,7 +2,6 @@ import unittest
 
 from secure_bigquery_mcp_gateway.query_policy import QueryPolicyError, validate_readonly_sql
 
-
 APPROVED = {"analytics_reporting"}
 
 
@@ -18,6 +17,5 @@ class QueryPolicyTests(unittest.TestCase):
             "SELECT * FROM `demo-project.raw_events.events`",
         ]
         for sql in unsafe_sql:
-            with self.subTest(sql=sql):
-                with self.assertRaises(QueryPolicyError):
-                    validate_readonly_sql(sql, APPROVED)
+            with self.subTest(sql=sql), self.assertRaises(QueryPolicyError):
+                validate_readonly_sql(sql, APPROVED)

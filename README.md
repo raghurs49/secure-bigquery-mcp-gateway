@@ -32,6 +32,23 @@ warehouse.
 - Remote MCP over **Streamable HTTP**, the recommended transport for deployed MCP servers.
 - Python MCP implementation with a Cloud Run-ready container.
 - Separate inbound caller authentication and outbound Google service identity.
+- **OAuth/OIDC bearer-token verification with JWKS caching**, falling back to a static bearer
+  token for simple machine-to-machine callers — see [`identity.py`](src/secure_bigquery_mcp_gateway/identity.py).
+- **Role-based access control**: each verified identity's role(s) resolve to a set of reachable
+  datasets/schemas via `ROLE_DATASET_MAP`, enforced independently of, and in addition to, the
+  gateway-wide allowlist.
+- **A second, independent read-only connector for Postgres** (schema allowlist, `SET TRANSACTION
+  READ ONLY`, statement timeout, row cap) — see [`postgres_service.py`](src/secure_bigquery_mcp_gateway/postgres_service.py).
+  Disabled by default; enabling it is one environment variable.
+- **A host-allowlisted REST connector** for calling an approved external API without ever handing
+  the caller, or the model, that API's credential.
+- **Best-effort PII masking** applied to every connector's result rows before they leave the
+  gateway (email/phone/SSN/card-shaped substrings) — a defence-in-depth layer, not a substitute
+  for querying pre-masked views.
+- **Structured JSON audit logging** of every tool call (subject, role, tool, decision, latency,
+  row count, masked-field count) — one Cloud Logging entry per call, no raw query text or row
+  contents logged.
+- **Per-identity rate limiting and a rolling daily byte budget**, enforced in memory.
 - Application Default Credentials rather than a service-account JSON key.
 - BigQuery dry-run cost checks plus `maximum_bytes_billed` enforcement.
 - SQL guardrails: one statement, `SELECT`/`WITH ... SELECT` only, dataset allowlist, row cap,
@@ -39,18 +56,18 @@ warehouse.
 - A production-minded recommendation to grant access to curated reporting views rather than
   raw operational tables.
 
-See [the architecture decision record](docs/architecture.md) for the security rationale.
+See [the architecture decision record](docs/architecture.md) for the security rationale and
+[the threat model](docs/threat-model.md) for what each control does and doesn't cover.
 
-## Important caveat about inbound authentication
+## Inbound authentication: bearer token or OIDC
 
-The reference build protects `/mcp` with a bearer token injected from Secret Manager. This is
-appropriate for a controlled machine-to-machine scheduler and makes the identity separation
-visible in a small project.
-
-For a Claude product that supports MCP OAuth/OIDC discovery, replace the middleware with a
-standards-compliant OAuth/OIDC token verifier. The correct choice depends on the Claude client
-and scheduling system; BigQuery access remains unchanged because it always comes from the
-Cloud Run service account.
+The reference build defaults to a bearer token injected from Secret Manager — appropriate for a
+controlled machine-to-machine scheduler, and it makes the identity separation visible in a small
+project. Setting `OIDC_ISSUER`, `OIDC_AUDIENCE`, and `OIDC_JWKS_URL` switches the same deployment
+to standards-compliant OIDC token verification with no code change: `identity.py` resolves roles
+from the configured claim (`OIDC_ROLE_CLAIM`, default `roles`) and RBAC/audit logging use the
+verified subject and roles either way. BigQuery access remains unchanged in both modes because it
+always comes from the Cloud Run service account, never from the caller's token.
 
 ## Local development
 
@@ -69,9 +86,19 @@ The MCP endpoint is available at `http://localhost:8080/mcp`. Supply:
 Authorization: Bearer <MCP_BEARER_TOKEN>
 ```
 
-Run the policy tests without any external test runner:
+or, once `OIDC_ISSUER`/`OIDC_AUDIENCE`/`OIDC_JWKS_URL` are set, a valid OIDC identity token from
+that issuer.
+
+Four tools are exposed: `execute_readonly_sql` (BigQuery), `execute_readonly_sql_postgres`
+(Postgres, only when `POSTGRES_DSN` is set), `call_allowed_rest_api` (only hosts in
+`REST_ALLOWED_HOSTS`), and `gateway_capabilities` (reports the caller's own resolved roles and
+reachable datasets — useful for confirming an RBAC change took effect without guessing).
+
+Run the tests:
 
 ```bash
+pytest -q
+# or, without pytest:
 python -m unittest discover -s tests
 ```
 
@@ -107,10 +134,17 @@ capable MCP client, replace this with a standards-compliant verifier and add edg
 ## Production checklist
 
 - [ ] Use reporting views or an authorised view layer, not raw customer/event tables.
-- [ ] Store the bearer token in Secret Manager and rotate it; use OAuth/OIDC when the MCP client supports it.
+- [ ] Prefer OIDC over the static bearer token once the MCP client supports it; rotate whichever is active.
 - [ ] Set a conservative byte cap and alert on BigQuery job labels.
+- [ ] Move `rate_limit.py`'s in-memory state to Memorystore/Redis before running more than one instance.
 - [ ] Restrict Cloud Run ingress and use a custom domain/WAF when appropriate.
-- [ ] Test a cold start, a denied write query, an over-budget query, and the real overnight caller.
+- [ ] Point `ROLE_DATASET_MAP` at the real roles your OIDC issuer will send, not just the reference `service:*`.
+- [ ] If enabling Postgres, confirm the connecting database role is itself granted `SELECT` only — this
+      gateway's read-only transaction is a second layer, not a substitute for that grant.
+- [ ] Review `REST_ALLOWED_HOSTS` against the actual integrations you intend to expose; an empty
+      allowlist (the default) means the REST tool can reach nothing.
+- [ ] Confirm `mask_pii` behaves as expected against a sample of real column values before relying on it.
+- [ ] Test a cold start, a denied write query, an over-budget query, an RBAC-denied dataset, and the real overnight caller.
 - [ ] Keep deployment privileges separate from the running service account.
 
 ## Project story for clients
@@ -118,7 +152,16 @@ capable MCP client, replace this with a standards-compliant verifier and add edg
 > I designed this gateway to solve the gap between an AI assistant's ability to call tools and
 > a production data warehouse's need for least-privilege access. The key decision is separating
 > the assistant's authentication to the MCP endpoint from the Cloud Run service account that
-> executes constrained, read-only BigQuery queries.
+> executes constrained, read-only BigQuery queries. I extended it from a single-connector,
+> bearer-token-only prototype into a multi-connector gateway (BigQuery, Postgres, and an
+> allowlisted REST API) with OIDC support, per-role dataset access, PII-aware result masking,
+> structured audit logging, and per-identity rate limits — the shape a client would actually
+> need before trusting it with more than one data source or more than one caller.
+
+## Known issue worth knowing about
+
+`mcp>=2.0.0` removed `mcp.server.fastmcp`, which this project's server is built on. `pyproject.toml`
+pins `mcp<2.0.0` accordingly — if a dependency bump ever breaks this, that's why.
 
 ## License
 

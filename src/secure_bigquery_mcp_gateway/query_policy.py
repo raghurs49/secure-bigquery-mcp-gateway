@@ -40,3 +40,10 @@ def validate_readonly_sql(sql: str, allowed_datasets: set[str]) -> str:
             f"Query references dataset(s) outside the allowlist: {', '.join(sorted(unapproved))}."
         )
     return normalized
+
+
+def extract_datasets(sql: str) -> set[str]:
+    """Datasets a query references, for RBAC checks that run after the base
+    allowlist check above. Shares the same regex so the two checks never disagree."""
+
+    return {match.group(1).lower() for match in _DATASET_REFERENCE.finditer(sql)}
